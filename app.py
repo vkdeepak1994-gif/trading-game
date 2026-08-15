@@ -686,7 +686,6 @@ with main_tab2:
         st.table(pd.DataFrame(opt_display))
     else:
         st.info("No active option contracts.")
-
 # =========================================================
 # TAB 3: LIVE CLASS LEADERBOARD
 # =========================================================
@@ -695,31 +694,67 @@ with main_tab3:
     if st.button("🔄 Refresh Standings"):
         st.rerun()
 
+    # Fetch all students and portfolio holdings
     all_students = supabase.table("students").select("*").execute().data
     all_portfolios = supabase.table("portfolio").select("*").execute().data
 
+    # Map current prices for all unique tickers held by students
     unique_tickers = list(set([p["ticker"] for p in all_portfolios]))
     price_map = {t: get_current_price(t) for t in unique_tickers}
 
     leaderboard = []
     for s in all_students:
         s_cash = float(s["cash"])
+        
+        # Get holdings specifically for this student
         s_holdings = [p for p in all_portfolios if p["student_id"] == s["id"]]
-        s_asset_val = sum([p["qty"] * price_map.get(p["ticker"], 0.0) for p in s_holdings])
+        
+        s_asset_val = 0.0
+        active_trades_list = []
+
+        # Calculate metrics for each specific trade/holding
+        for p in s_holdings:
+            ticker = p["ticker"]
+            qty = p["qty"]
+            avg_price = float(p["avg_price"])
+            cur_price = price_map.get(ticker, 0.0)
+            
+            # Market value & PnL for this specific trade
+            mkt_val = qty * cur_price
+            s_asset_val += mkt_val
+            
+            pnl = mkt_val - (qty * avg_price)
+            pnl_str = f"+₹{pnl:,.2f}" if pnl >= 0 else f"-₹{abs(pnl):,.2f}"
+            
+            # Format the trade details string
+            active_trades_list.append(f"{ticker} [Qty: {qty} | PnL: {pnl_str}]")
+
+        # Compile final net worth
         total_val = s_cash + s_asset_val
-        ret_pct = ((total_val - 1000000.0) / 1000000.0) * 100  # CHANGED: Return base is now 10 Lakhs
+        ret_pct = ((total_val - 1000000.0) / 1000000.0) * 100  # Based on 10 Lakhs
+
+        # Join all active trades into a single readable string, or show "No Active Trades"
+        trades_summary = "  ||  ".join(active_trades_list) if active_trades_list else "No Active Trades"
 
         leaderboard.append({
             "Student Name": s["name"],
             "Roll Number": s["roll_no"],
+            "Total Net Worth (₹)": total_val, # Kept as float for sorting
+            "Return (%)": f"{ret_pct:+.2f}%",
             "Cash Balance (₹)": f"₹{s_cash:,.2f}",
-            "Holdings Value (₹)": f"₹{s_asset_val:,.2f}",
-            "Total Net Worth (₹)": total_val,
-            "Return (%)": f"{ret_pct:+.2f}%"
+            "Open Trades Details (Ticker | Qty | PnL)": trades_summary
         })
 
+    # Render Leaderboard
     if leaderboard:
+        # Sort by Total Net Worth
         df_lb = pd.DataFrame(leaderboard).sort_values(by="Total Net Worth (₹)", ascending=False).reset_index(drop=True)
-        df_lb.index += 1
+        df_lb.index += 1  # Start rank index at 1
+        
+        # Format the Net Worth column back to string for clean UI display
         df_lb["Total Net Worth (₹)"] = df_lb["Total Net Worth (₹)"].apply(lambda x: f"₹{x:,.2f}")
+        
+        # Display the dataframe in Streamlit
         st.dataframe(df_lb, use_container_width=True)
+    else:
+        st.info("No students registered yet.")
