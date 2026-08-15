@@ -175,7 +175,7 @@ if not st.session_state.user:
                         "roll_no": roll_no, 
                         "name": name, 
                         "pin": pin, 
-                        "cash": 100000.0
+                        "cash": 1000000.0  # CHANGED: Starting capital is now 10 Lakhs
                     }).execute()
                     if res.data:
                         st.sidebar.success("🎉 Registered! Switch to Login to sign in.")
@@ -707,7 +707,7 @@ with main_tab3:
         s_holdings = [p for p in all_portfolios if p["student_id"] == s["id"]]
         s_asset_val = sum([p["qty"] * price_map.get(p["ticker"], 0.0) for p in s_holdings])
         total_val = s_cash + s_asset_val
-        ret_pct = ((total_val - 100000.0) / 100000.0) * 100
+        ret_pct = ((total_val - 1000000.0) / 1000000.0) * 100  # CHANGED: Return base is now 10 Lakhs
 
         leaderboard.append({
             "Student Name": s["name"],
