@@ -12,11 +12,16 @@ st.set_page_config(page_title="B.Com Investment Terminal", layout="wide")
 
 @st.cache_resource
 def init_supabase() -> Client:
-    url = st.secrets["SUPABASE_URL"]
-    key = st.secrets["SUPABASE_KEY"]
+    # Clean secrets to prevent space/quote formatting issues
+    url = st.secrets["SUPABASE_URL"].strip().strip('"').strip("'")
+    key = st.secrets["SUPABASE_KEY"].strip().strip('"').strip("'")
     return create_client(url, key)
 
-supabase = init_supabase()
+try:
+    supabase = init_supabase()
+except Exception as e:
+    st.error("⚠️ Database connection setup failed. Please check your Secrets in Streamlit.")
+    st.stop()
 
 if "user" not in st.session_state:
     st.session_state.user = None
@@ -35,27 +40,44 @@ if not st.session_state.user:
         name = st.sidebar.text_input("Full Name:")
         if st.sidebar.button("Register Account"):
             if roll_no and pin and name:
-                res = supabase.table("students").insert({"roll_no": roll_no, "name": name, "pin": pin, "cash": 100000.0}).execute()
-                if res.data:
-                    st.sidebar.success("Registered! You can now log in.")
-                else:
-                    st.sidebar.error("Roll Number already registered.")
+                try:
+                    res = supabase.table("students").insert({
+                        "roll_no": roll_no, 
+                        "name": name, 
+                        "pin": pin, 
+                        "cash": 100000.0
+                    }).execute()
+                    
+                    if res.data:
+                        st.sidebar.success("🎉 Registered successfully! Switch to Login to sign in.")
+                    else:
+                        st.sidebar.error("Roll Number already registered.")
+                except Exception as err:
+                    st.sidebar.error("Could not connect to database. Make sure your app was Rebooted after adding secrets!")
             else:
-                st.sidebar.warning("Fill in all fields.")
+                st.sidebar.warning("Please fill in all fields.")
 
     elif auth_mode == "Login":
         if st.sidebar.button("Login"):
-            res = supabase.table("students").select("*").eq("roll_no", roll_no).eq("pin", pin).execute()
-            if res.data:
-                st.session_state.user = res.data[0]
-                st.sidebar.success(f"Welcome {res.data[0]['name']}!")
-                st.rerun()
-            else:
-                st.sidebar.error("Invalid Roll Number or PIN.")
+            try:
+                res = supabase.table("students").select("*").eq("roll_no", roll_no).eq("pin", pin).execute()
+                if res.data:
+                    st.session_state.user = res.data[0]
+                    st.sidebar.success(f"Welcome {res.data[0]['name']}!")
+                    st.rerun()
+                else:
+                    st.sidebar.error("Invalid Roll Number or PIN.")
+            except Exception as err:
+                st.sidebar.error("Connection error. Please refresh the page.")
     st.stop()
+
 else:
-    user_data = supabase.table("students").select("*").eq("id", st.session_state.user["id"]).execute().data[0]
-    st.session_state.user = user_data
+    try:
+        user_data = supabase.table("students").select("*").eq("id", st.session_state.user["id"]).execute().data[0]
+        st.session_state.user = user_data
+    except Exception:
+        pass
+        
     st.sidebar.write(f"**Logged in as:** {st.session_state.user['name']} ({st.session_state.user['roll_no']})")
     if st.sidebar.button("Logout"):
         st.session_state.user = None
@@ -70,7 +92,7 @@ def get_current_price(ticker_symbol):
     try:
         data = yf.Ticker(ticker_symbol).history(period="1d")
         if not data.empty:
-            return data['Close'].iloc[-1]
+            return float(data['Close'].iloc[-1])
     except Exception:
         pass
     return 0.0
@@ -84,7 +106,7 @@ with main_tab1:
         stock = yf.Ticker(ticker_input)
         df = stock.history(period=time_frame)
         info = stock.info
-        current_price = df['Close'].iloc[-1]
+        current_price = float(df['Close'].iloc[-1])
     except Exception:
         st.error(f"Failed to fetch data for ticker: {ticker_input}. Verify valid Yahoo Finance symbol.")
         st.stop()
