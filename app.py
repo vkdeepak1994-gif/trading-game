@@ -9,7 +9,7 @@ import math
 # ---------------------------------------------------------
 # 1. DATABASE & PAGE SETUP
 # ---------------------------------------------------------
-st.set_page_config(page_title="B.Com Advanced Trading & F&O Terminal", layout="wide")
+st.set_page_config(page_title="B.Com Advanced Pro Terminal & F&O Desk", layout="wide")
 
 @st.cache_resource
 def init_supabase() -> Client:
@@ -51,17 +51,12 @@ def calculate_option_premium(spot: float, strike: float, opt_type: str, index_na
     return round(max(price, intrinsic, 10.50), 2)
 
 def generate_simulated_oi(spot: float, strike: float, opt_type: str) -> int:
-    """Generates realistic Open Interest (OI) buildup based on strike distance."""
     if spot <= 0:
         return 10000
     dist_pct = abs(spot - strike) / spot
     base_oi = math.exp(-dist_pct * 25) * 180000
-    
-    # OTM options usually have higher OI writing
     is_otm = (opt_type == "CE" and strike >= spot) or (opt_type == "PE" and strike <= spot)
     multiplier = 1.35 if is_otm else 0.75
-    
-    # Pseudo-random deterministic noise based on strike
     noise = (int(strike) * 17) % 25000
     total_oi = int((base_oi * multiplier) + noise)
     return max(8500, total_oi)
@@ -90,6 +85,67 @@ def get_current_price(ticker_symbol: str) -> float:
         except Exception:
             pass
         return 0.0
+
+@st.cache_data(ttl=30)
+def get_option_intraday_ohlc(idx_symbol: str, idx_code: str, strike: float, opt_type: str, timeframe: str) -> pd.DataFrame:
+    """Generates dynamic multi-timeframe OHLC candlestick data for Option Premiums."""
+    interval_map = {
+        "1m": ("1d", "1m"),
+        "3m": ("1d", "1m"),
+        "5m": ("5d", "5m"),
+        "15m": ("5d", "15m"),
+        "30m": ("5d", "30m"),
+        "60m": ("7d", "60m")
+    }
+    period, yf_interval = interval_map.get(timeframe, ("1d", "1m"))
+    
+    try:
+        df_idx = yf.Ticker(idx_symbol).history(period=period, interval=yf_interval)
+        if df_idx.empty:
+            return pd.DataFrame()
+        
+        if timeframe == "3m":
+            df_idx = df_idx.resample('3min').agg({
+                'Open': 'first',
+                'High': 'max',
+                'Low': 'min',
+                'Close': 'last',
+                'Volume': 'sum'
+            }).dropna()
+
+        option_ohlc = []
+        for timestamp, row in df_idx.iterrows():
+            spot_o = float(row['Open'])
+            spot_h = float(row['High'])
+            spot_l = float(row['Low'])
+            spot_c = float(row['Close'])
+            
+            prem_o = calculate_option_premium(spot_o, strike, opt_type, idx_code)
+            prem_c = calculate_option_premium(spot_c, strike, opt_type, idx_code)
+            
+            if opt_type == "CE":
+                prem_h = calculate_option_premium(spot_h, strike, opt_type, idx_code)
+                prem_l = calculate_option_premium(spot_l, strike, opt_type, idx_code)
+            else:
+                prem_h = calculate_option_premium(spot_l, strike, opt_type, idx_code)
+                prem_l = calculate_option_premium(spot_h, strike, opt_type, idx_code)
+
+            vol = int(max(10, (row['Volume'] * 0.05) + ((strike % 100) * 15)))
+
+            option_ohlc.append({
+                "Datetime": timestamp,
+                "Open": prem_o,
+                "High": max(prem_o, prem_h, prem_l, prem_c),
+                "Low": min(prem_o, prem_h, prem_l, prem_c),
+                "Close": prem_c,
+                "Volume": vol
+            })
+
+        df_opt = pd.DataFrame(option_ohlc)
+        df_opt.set_index("Datetime", inplace=True)
+        return df_opt
+    except Exception:
+        return pd.DataFrame()
 
 # ---------------------------------------------------------
 # 3. AUTHENTICATION (LOGIN / REGISTER)
@@ -146,7 +202,7 @@ else:
         st.session_state.user = None
         st.rerun()
 
-# Risk Parameter Sidebar
+# Global Risk Parameter Sidebar
 st.sidebar.markdown("---")
 st.sidebar.subheader("🛡️ Risk Controls")
 max_alloc_pct = st.sidebar.slider("Max Capital per Trade (% of Cash):", min_value=10, max_value=100, value=30, step=5)
@@ -156,7 +212,7 @@ max_alloc_pct = st.sidebar.slider("Max Capital per Trade (% of Cash):", min_valu
 # ---------------------------------------------------------
 main_tab1, main_tab2, main_tab3 = st.tabs([
     "📊 Pro Stock Terminal", 
-    "⚡ F&O Options Desk (NSE & BSE)", 
+    "⚡ Option Chain & Intraday Desk", 
     "🏆 Live Class Leaderboard"
 ])
 
@@ -171,7 +227,8 @@ with main_tab1:
     ticker_input = st.sidebar.text_input("Stock Ticker (e.g. RELIANCE.NS, TCS.NS, AAPL):", value="RELIANCE.NS").upper()
     time_frame = st.sidebar.selectbox("Timeframe:", ["1mo", "3mo", "6mo", "1y"], index=2)
 
-    st.sidebar.markdown("**Technical Indicators:**")
+    st.sidebar.markdown("**Technical Indicators & Levels:**")
+    show_sr = st.sidebar.checkbox("Support & Resistance (Pivots)", value=True)
     show_sma = st.sidebar.checkbox("20 SMA", value=True)
     show_ema = st.sidebar.checkbox("50 EMA", value=True)
     show_bb = st.sidebar.checkbox("Bollinger Bands", value=True)
@@ -187,6 +244,7 @@ with main_tab1:
         st.error(f"Failed to fetch stock data for: {ticker_input}")
         st.stop()
 
+    # Calculate Indicators
     df['SMA_20'] = df['Close'].rolling(window=20).mean()
     df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
     std_20 = df['Close'].rolling(window=20).std()
@@ -204,12 +262,23 @@ with main_tab1:
     df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
 
+    # Support & Resistance (Classic Pivot Points)
+    last_high = float(df['High'].iloc[-2]) if len(df) > 1 else float(df['High'].iloc[-1])
+    last_low = float(df['Low'].iloc[-2]) if len(df) > 1 else float(df['Low'].iloc[-1])
+    last_close = float(df['Close'].iloc[-2]) if len(df) > 1 else float(df['Close'].iloc[-1])
+
+    pivot = (last_high + last_low + last_close) / 3.0
+    r1 = (2 * pivot) - last_low
+    s1 = (2 * pivot) - last_high
+    r2 = pivot + (last_high - last_low)
+    s2 = pivot - (last_high - last_low)
+
     st.subheader(f"📊 Fundamental Analysis: {info.get('longName', ticker_input)}")
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Current Price", f"₹{current_price:.2f}")
-    c2.metric("Trailing P/E", f"{info.get('trailingPE', 'N/A')}")
-    c3.metric("P/B Ratio", f"{info.get('priceToBook', 'N/A')}")
-    c4.metric("Debt-to-Equity", f"{info.get('debtToEquity', 'N/A')}")
+    c2.metric("Pivot Level (P)", f"₹{pivot:.2f}")
+    c3.metric("Resistance (R1)", f"₹{r1:.2f}")
+    c4.metric("Support (S1)", f"₹{s1:.2f}")
     c5.metric("52W High", f"₹{info.get('fiftyTwoWeekHigh', 'N/A')}")
 
     rows = 1
@@ -221,7 +290,7 @@ with main_tab1:
         rows += 1
         row_heights.append(0.2)
 
-    st.subheader("📉 Technical Chart with Custom Indicators")
+    st.subheader("📉 Technical Chart with Custom Indicators & S/R Pivots")
     fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=row_heights)
     fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Candlestick"), row=1, col=1)
     
@@ -232,6 +301,13 @@ with main_tab1:
     if show_bb:
         fig.add_trace(go.Scatter(x=df.index, y=df['BB_Upper'], mode='lines', name='BB Upper', line=dict(color='gray', dash='dash')), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['BB_Lower'], mode='lines', name='BB Lower', line=dict(color='gray', dash='dash')), row=1, col=1)
+
+    if show_sr:
+        fig.add_hline(y=r2, line_dash="dot", line_color="red", annotation_text="R2", row=1, col=1)
+        fig.add_hline(y=r1, line_dash="dash", line_color="crimson", annotation_text="R1", row=1, col=1)
+        fig.add_hline(y=pivot, line_dash="dash", line_color="gold", annotation_text="Pivot (P)", row=1, col=1)
+        fig.add_hline(y=s1, line_dash="dash", line_color="mediumseagreen", annotation_text="S1", row=1, col=1)
+        fig.add_hline(y=s2, line_dash="dot", line_color="green", annotation_text="S2", row=1, col=1)
 
     curr_row = 2
     if show_rsi:
@@ -331,54 +407,146 @@ with main_tab1:
             st.info("No equity stock holdings.")
 
 # =========================================================
-# TAB 2: OPTIONS TRADING DESK (NSE & BSE)
+# TAB 2: LIVE OPTION CHAIN & INTRADAY DESK
 # =========================================================
 with main_tab2:
-    st.subheader("⚡ Index Options Desk (NSE & BSE F&O)")
+    st.subheader("⚡ Option Chain & Intraday Trading Desk")
 
-    col_opt1, col_opt2 = st.columns([1, 1.2])
-
-    with col_opt1:
-        st.markdown("### 🎯 Select Contract")
+    col_idx, col_spot = st.columns([1, 1])
+    with col_idx:
         chosen_index = st.selectbox("Select Index:", ["NIFTY 50", "BANK NIFTY", "BSE SENSEX"])
         
-        # Configure Ticker, Lot Size, and Step per Index
         if chosen_index == "NIFTY 50":
             idx_symbol, idx_code, lot_size, step = "^NSEI", "NIFTY", 25, 100
         elif chosen_index == "BANK NIFTY":
             idx_symbol, idx_code, lot_size, step = "^NSEBANK", "BANKNIFTY", 15, 100
-        else:  # BSE SENSEX
+        else:
             idx_symbol, idx_code, lot_size, step = "^BSESN", "SENSEX", 10, 100
 
         spot_price = get_spot_price(idx_symbol)
-        st.metric(f"Live {chosen_index} Spot Price", f"₹{spot_price:,.2f}")
 
-        base_strike = round(spot_price / step) * step
-        strikes = [base_strike + (i * step) for i in range(-5, 6)]
+    with col_spot:
+        st.metric(f"Live {chosen_index} Spot Price", f"₹{spot_price:,.2f}", delta="Real-Time Data")
 
-        selected_strike = st.selectbox("Select Strike Price:", strikes, index=5)
-        opt_type = st.radio("Option Type:", ["Call Option (CE)", "Put Option (PE)"], horizontal=True)
-        opt_code = "CE" if "Call" in opt_type else "PE"
+    base_strike = round(spot_price / step) * step
+    strikes = [base_strike + (i * step) for i in range(-5, 6)]
 
-        opt_ticker = f"OPT:{idx_code}:{selected_strike}:{opt_code}"
-        premium = calculate_option_premium(spot_price, float(selected_strike), opt_code, idx_code)
-        single_oi = generate_simulated_oi(spot_price, float(selected_strike), opt_code)
+    # ---------------------------------------------------------
+    # OPTION CHAIN MATRIX (CALLS | STRIKE | PUTS)
+    # ---------------------------------------------------------
+    st.markdown("### 📋 Live Option Chain Matrix")
+    
+    chain_rows = []
+    tot_call_oi, tot_put_oi = 0, 0
+    for s_price in strikes:
+        c_prem = calculate_option_premium(spot_price, float(s_price), "CE", idx_code)
+        p_prem = calculate_option_premium(spot_price, float(s_price), "PE", idx_code)
+        c_oi = generate_simulated_oi(spot_price, float(s_price), "CE")
+        p_oi = generate_simulated_oi(spot_price, float(s_price), "PE")
+        
+        tot_call_oi += c_oi
+        tot_put_oi += p_oi
 
-        c_p1, c_p2 = st.columns(2)
-        c_p1.info(f"💡 **Premium:** ₹{premium:.2f} / share\n\n📦 **1 Lot** = {lot_size} shares")
-        c_p2.metric("Contract Open Interest (OI)", f"{single_oi:,} contracts")
+        c_itm = "ITM 🟡" if spot_price > s_price else "OTM"
+        p_itm = "ITM 🟡" if spot_price < s_price else "OTM"
 
-    with col_opt2:
-        st.markdown("### 💳 Order Execution")
-        opt_trade_action = st.radio("Action:", ["BUY", "SELL"], key="opt_action", horizontal=True)
+        chain_rows.append({
+            "Call Status": c_itm,
+            "Call OI": f"{c_oi:,}",
+            "Call Premium (₹)": f"₹{c_prem:.2f}",
+            "STRIKE PRICE": f"👉 {s_price:,} 👈" if s_price == base_strike else f"{s_price:,}",
+            "Put Premium (₹)": f"₹{p_prem:.2f}",
+            "Put OI": f"{p_oi:,}",
+            "Put Status": p_itm
+        })
+
+    st.dataframe(pd.DataFrame(chain_rows), use_container_width=True)
+
+    pcr = tot_put_oi / max(1, tot_call_oi)
+    pcr_sentiment = "🟢 Bullish (Strong Put Writing)" if pcr > 1.1 else ("🔴 Bearish (Strong Call Writing)" if pcr < 0.85 else "🟡 Neutral")
+    st.caption(f"📊 **Total Call OI:** {tot_call_oi:,} | **Total Put OI:** {tot_put_oi:,} | **Put-Call Ratio (PCR):** {pcr:.2f} ({pcr_sentiment})")
+
+    # ---------------------------------------------------------
+    # INDIVIDUAL OPTION CONTRACT INTRADAY CHARTING ENGINE
+    # ---------------------------------------------------------
+    st.markdown("---")
+    st.markdown("### 📈 Individual Option Contract Intraday Chart")
+    
+    c_chart1, c_chart2, c_chart3 = st.columns([1, 1, 1])
+    with c_chart1:
+        selected_strike = st.selectbox("Select Strike Price for Charting:", strikes, index=5, key="chart_strike")
+    with c_chart2:
+        opt_type_chart = st.radio("Option Type:", ["Call Option (CE)", "Put Option (PE)"], horizontal=True, key="chart_opt_type")
+        opt_code_chart = "CE" if "Call" in opt_type_chart else "PE"
+    with c_chart3:
+        opt_timeframe = st.selectbox("Intraday Timeframe:", ["1m", "3m", "5m", "15m", "30m", "60m"], index=2, key="chart_tf")
+
+    opt_chart_ticker = f"OPT:{idx_code}:{selected_strike}:{opt_code_chart}"
+    df_opt_chart = get_option_intraday_ohlc(idx_symbol, idx_code, float(selected_strike), opt_code_chart, opt_timeframe)
+
+    if not df_opt_chart.empty:
+        df_opt_chart['EMA_9'] = df_opt_chart['Close'].ewm(span=9, adjust=False).mean()
+        df_opt_chart['EMA_21'] = df_opt_chart['Close'].ewm(span=21, adjust=False).mean()
+
+        m_opt1, m_opt2, m_opt3, m_opt4 = st.columns(4)
+        m_opt1.metric("Live Premium", f"₹{df_opt_chart['Close'].iloc[-1]:.2f}")
+        m_opt2.metric("Intraday High", f"₹{df_opt_chart['High'].max():.2f}")
+        m_opt3.metric("Intraday Low", f"₹{df_opt_chart['Low'].min():.2f}")
+        m_opt4.metric("Open Premium", f"₹{df_opt_chart['Open'].iloc[0]:.2f}")
+
+        fig_opt = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=[0.7, 0.3])
+        
+        # Option Premium Candlestick
+        fig_opt.add_trace(
+            go.Candlestick(
+                x=df_opt_chart.index,
+                open=df_opt_chart['Open'],
+                high=df_opt_chart['High'],
+                low=df_opt_chart['Low'],
+                close=df_opt_chart['Close'],
+                name=f"{opt_chart_ticker} Premium"
+            ), row=1, col=1
+        )
+        
+        fig_opt.add_trace(go.Scatter(x=df_opt_chart.index, y=df_opt_chart['EMA_9'], mode='lines', name='9 EMA', line=dict(color='yellow', width=1.5)), row=1, col=1)
+        fig_opt.add_trace(go.Scatter(x=df_opt_chart.index, y=df_opt_chart['EMA_21'], mode='lines', name='21 EMA', line=dict(color='purple', width=1.5)), row=1, col=1)
+
+        # Volume
+        vol_colors = ['green' if df_opt_chart['Close'].iloc[i] >= df_opt_chart['Open'].iloc[i] else 'red' for i in range(len(df_opt_chart))]
+        fig_opt.add_trace(go.Bar(x=df_opt_chart.index, y=df_opt_chart['Volume'], name='Option Volume', marker_color=vol_colors), row=2, col=1)
+
+        fig_opt.update_layout(
+            title=f"Intraday Premium Chart: {opt_chart_ticker} ({opt_timeframe} candles)",
+            height=480,
+            xaxis_rangeslider_visible=False,
+            template="plotly_dark",
+            margin=dict(l=10, r=10, t=40, b=10)
+        )
+        st.plotly_chart(fig_opt, use_container_width=True)
+    else:
+        st.info("⌛ Fetching option intraday ticks... Please wait or refresh.")
+
+    # ---------------------------------------------------------
+    # QUICK ORDER EXECUTION DESK
+    # ---------------------------------------------------------
+    st.markdown("---")
+    st.markdown("### 💳 Contract Order Execution")
+    col_exec1, col_exec2 = st.columns(2)
+
+    with col_exec1:
+        premium = calculate_option_premium(spot_price, float(selected_strike), opt_code_chart, idx_code)
+        st.info(f"💡 **Contract:** `{opt_chart_ticker}`\n\n**Live Premium:** ₹{premium:.2f} / share | **1 Lot** = {lot_size} shares")
+
+    with col_exec2:
+        opt_trade_action = st.radio("Order Action:", ["BUY", "SELL"], key="opt_action", horizontal=True)
         num_lots = st.number_input("Number of Lots:", min_value=1, value=1, step=1)
         total_shares = num_lots * lot_size
         total_premium_cost = total_shares * premium
 
-        st.metric("Total Premium Required", f"₹{total_premium_cost:,.2f}")
+        st.metric("Total Order Cost", f"₹{total_premium_cost:,.2f}")
         st.caption(f"📍 **Max Allowed per Order ({max_alloc_pct}%):** ₹{max_trade_budget:,.2f}")
 
-        existing_opt_pos = supabase.table("portfolio").select("*").eq("student_id", student_id).eq("ticker", opt_ticker).execute().data
+        existing_opt_pos = supabase.table("portfolio").select("*").eq("student_id", student_id).eq("ticker", opt_chart_ticker).execute().data
 
         if st.button("Submit Options Order"):
             if opt_trade_action == "BUY":
@@ -395,9 +563,9 @@ with main_tab2:
                         new_avg = ((prev_qty * prev_avg) + total_premium_cost) / new_qty
                         supabase.table("portfolio").update({"qty": new_qty, "avg_price": new_avg}).eq("id", existing_opt_pos[0]["id"]).execute()
                     else:
-                        supabase.table("portfolio").insert({"student_id": student_id, "ticker": opt_ticker, "qty": total_shares, "avg_price": premium}).execute()
+                        supabase.table("portfolio").insert({"student_id": student_id, "ticker": opt_chart_ticker, "qty": total_shares, "avg_price": premium}).execute()
 
-                    st.success(f"Bought {num_lots} Lot(s) of {opt_ticker}!")
+                    st.success(f"Bought {num_lots} Lot(s) of {opt_chart_ticker}!")
                     st.rerun()
                 else:
                     st.error("Insufficient Cash Balance!")
@@ -413,40 +581,10 @@ with main_tab2:
                         new_qty = existing_opt_pos[0]["qty"] - total_shares
                         supabase.table("portfolio").update({"qty": new_qty}).eq("id", existing_opt_pos[0]["id"]).execute()
 
-                    st.success(f"Sold {num_lots} Lot(s) of {opt_ticker}!")
+                    st.success(f"Sold {num_lots} Lot(s) of {opt_chart_ticker}!")
                     st.rerun()
                 else:
                     st.error("Insufficient option contracts in portfolio!")
-
-    # ---------------------------------------------------------
-    # OPEN INTEREST (OI) & PCR ANALYSIS CHART
-    # ---------------------------------------------------------
-    st.markdown("---")
-    st.subheader(f"📊 Open Interest (OI) Analysis & Put-Call Ratio: {chosen_index}")
-    
-    oi_data = []
-    tot_call_oi, tot_put_oi = 0, 0
-    for s_price in strikes:
-        c_oi = generate_simulated_oi(spot_price, float(s_price), "CE")
-        p_oi = generate_simulated_oi(spot_price, float(s_price), "PE")
-        tot_call_oi += c_oi
-        tot_put_oi += p_oi
-        oi_data.append({"Strike": str(s_price), "Call OI (Resistance)": c_oi, "Put OI (Support)": p_oi})
-
-    pcr = tot_put_oi / max(1, tot_call_oi)
-    pcr_sentiment = "🟢 Bullish (Strong Put Writing)" if pcr > 1.1 else ("🔴 Bearish (Strong Call Writing)" if pcr < 0.85 else "🟡 Neutral")
-
-    m_pcr1, m_pcr2, m_pcr3 = st.columns(3)
-    m_pcr1.metric("Total Call Open Interest", f"{tot_call_oi:,}")
-    m_pcr2.metric("Total Put Open Interest", f"{tot_put_oi:,}")
-    m_pcr3.metric("Put-Call Ratio (PCR)", f"{pcr:.2f}", delta=pcr_sentiment)
-
-    df_oi = pd.DataFrame(oi_data)
-    fig_oi = go.Figure()
-    fig_oi.add_trace(go.Bar(x=df_oi["Strike"], y=df_oi["Call OI (Resistance)"], name="Call OI (Call Writers / Resistance)", marker_color="crimson"))
-    fig_oi.add_trace(go.Bar(x=df_oi["Strike"], y=df_oi["Put OI (Support)"], name="Put OI (Put Writers / Support)", marker_color="mediumseagreen"))
-    fig_oi.update_layout(barmode="group", height=380, template="plotly_dark", title="Open Interest Build-Up across Strike Prices", margin=dict(l=10, r=10, t=40, b=10))
-    st.plotly_chart(fig_oi, use_container_width=True)
 
     st.markdown("---")
     st.subheader("📜 Open Options Positions")
