@@ -87,8 +87,8 @@ def get_current_price(ticker_symbol: str) -> float:
         return 0.0
 
 @st.cache_data(ttl=30)
-def get_option_intraday_ohlc(idx_symbol: str, idx_code: str, strike: float, opt_type: str, timeframe: str) -> pd.DataFrame:
-    """Generates dynamic multi-timeframe OHLC candlestick data for Option Premiums."""
+def get_index_intraday_ohlc(idx_symbol: str, timeframe: str) -> pd.DataFrame:
+    """Fetches Intraday OHLC Data for Index Spot Price."""
     interval_map = {
         "1m": ("1d", "1m"),
         "3m": ("1d", "1m"),
@@ -98,21 +98,30 @@ def get_option_intraday_ohlc(idx_symbol: str, idx_code: str, strike: float, opt_
         "60m": ("7d", "60m")
     }
     period, yf_interval = interval_map.get(timeframe, ("1d", "1m"))
-    
     try:
-        df_idx = yf.Ticker(idx_symbol).history(period=period, interval=yf_interval)
-        if df_idx.empty:
+        df = yf.Ticker(idx_symbol).history(period=period, interval=yf_interval)
+        if df.empty:
             return pd.DataFrame()
-        
         if timeframe == "3m":
-            df_idx = df_idx.resample('3min').agg({
+            df = df.resample('3min').agg({
                 'Open': 'first',
                 'High': 'max',
                 'Low': 'min',
                 'Close': 'last',
                 'Volume': 'sum'
             }).dropna()
+        return df
+    except Exception:
+        return pd.DataFrame()
 
+@st.cache_data(ttl=30)
+def get_option_intraday_ohlc(idx_symbol: str, idx_code: str, strike: float, opt_type: str, timeframe: str) -> pd.DataFrame:
+    """Generates dynamic multi-timeframe OHLC candlestick data for Option Premiums."""
+    df_idx = get_index_intraday_ohlc(idx_symbol, timeframe)
+    if df_idx.empty:
+        return pd.DataFrame()
+    
+    try:
         option_ohlc = []
         for timestamp, row in df_idx.iterrows():
             spot_o = float(row['Open'])
@@ -212,7 +221,7 @@ max_alloc_pct = st.sidebar.slider("Max Capital per Trade (% of Cash):", min_valu
 # ---------------------------------------------------------
 main_tab1, main_tab2, main_tab3 = st.tabs([
     "📊 Pro Stock Terminal", 
-    "⚡ Option Chain & Intraday Desk", 
+    "⚡ Option Chain & Dual Trading Desk", 
     "🏆 Live Class Leaderboard"
 ])
 
@@ -227,13 +236,13 @@ with main_tab1:
     ticker_input = st.sidebar.text_input("Stock Ticker (e.g. RELIANCE.NS, TCS.NS, AAPL):", value="RELIANCE.NS").upper()
     time_frame = st.sidebar.selectbox("Timeframe:", ["1mo", "3mo", "6mo", "1y"], index=2)
 
-    st.sidebar.markdown("**Technical Indicators & Levels:**")
-    show_sr = st.sidebar.checkbox("Support & Resistance (Pivots)", value=True)
-    show_sma = st.sidebar.checkbox("20 SMA", value=True)
-    show_ema = st.sidebar.checkbox("50 EMA", value=True)
-    show_bb = st.sidebar.checkbox("Bollinger Bands", value=True)
-    show_rsi = st.sidebar.checkbox("RSI (14)", value=True)
-    show_macd = st.sidebar.checkbox("MACD", value=True)
+    st.sidebar.markdown("**Stock Technical Indicators:**")
+    show_sr = st.sidebar.checkbox("Support & Resistance (Pivots)", value=True, key="stk_sr")
+    show_sma = st.sidebar.checkbox("20 SMA", value=True, key="stk_sma")
+    show_ema = st.sidebar.checkbox("50 EMA", value=True, key="stk_ema")
+    show_bb = st.sidebar.checkbox("Bollinger Bands", value=True, key="stk_bb")
+    show_rsi = st.sidebar.checkbox("RSI (14)", value=True, key="stk_rsi")
+    show_macd = st.sidebar.checkbox("MACD", value=True, key="stk_macd")
 
     try:
         stock = yf.Ticker(ticker_input)
@@ -244,7 +253,6 @@ with main_tab1:
         st.error(f"Failed to fetch stock data for: {ticker_input}")
         st.stop()
 
-    # Calculate Indicators
     df['SMA_20'] = df['Close'].rolling(window=20).mean()
     df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
     std_20 = df['Close'].rolling(window=20).std()
@@ -262,7 +270,6 @@ with main_tab1:
     df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
 
-    # Support & Resistance (Classic Pivot Points)
     last_high = float(df['High'].iloc[-2]) if len(df) > 1 else float(df['High'].iloc[-1])
     last_low = float(df['Low'].iloc[-2]) if len(df) > 1 else float(df['Low'].iloc[-1])
     last_close = float(df['Close'].iloc[-2]) if len(df) > 1 else float(df['Close'].iloc[-1])
@@ -407,33 +414,163 @@ with main_tab1:
             st.info("No equity stock holdings.")
 
 # =========================================================
-# TAB 2: LIVE OPTION CHAIN & INTRADAY DESK
+# TAB 2: LIVE OPTION CHAIN & DUAL TRADING DESK
 # =========================================================
 with main_tab2:
-    st.subheader("⚡ Option Chain & Intraday Trading Desk")
+    st.subheader("⚡ Option Chain & Professional Dual Trading Desk")
 
-    col_idx, col_spot = st.columns([1, 1])
-    with col_idx:
+    # TOP CONTROL BAR
+    c_ctrl1, c_ctrl2, c_ctrl3, c_ctrl4 = st.columns([1.2, 1, 1, 1])
+    with c_ctrl1:
         chosen_index = st.selectbox("Select Index:", ["NIFTY 50", "BANK NIFTY", "BSE SENSEX"])
-        
         if chosen_index == "NIFTY 50":
             idx_symbol, idx_code, lot_size, step = "^NSEI", "NIFTY", 25, 100
         elif chosen_index == "BANK NIFTY":
             idx_symbol, idx_code, lot_size, step = "^NSEBANK", "BANKNIFTY", 15, 100
         else:
             idx_symbol, idx_code, lot_size, step = "^BSESN", "SENSEX", 10, 100
-
         spot_price = get_spot_price(idx_symbol)
-
-    with col_spot:
-        st.metric(f"Live {chosen_index} Spot Price", f"₹{spot_price:,.2f}", delta="Real-Time Data")
 
     base_strike = round(spot_price / step) * step
     strikes = [base_strike + (i * step) for i in range(-5, 6)]
 
+    with c_ctrl2:
+        selected_strike = st.selectbox("Select Strike Price:", strikes, index=5, key="desk_strike")
+    with c_ctrl3:
+        opt_type_chart = st.radio("Option Type:", ["Call Option (CE)", "Put Option (PE)"], horizontal=True, key="desk_opt_type")
+        opt_code_chart = "CE" if "Call" in opt_type_chart else "PE"
+    with c_ctrl4:
+        opt_timeframe = st.selectbox("Intraday Timeframe:", ["1m", "3m", "5m", "15m", "30m", "60m"], index=2, key="desk_tf")
+
+    opt_chart_ticker = f"OPT:{idx_code}:{selected_strike}:{opt_code_chart}"
+
+    # INDEX TECHNICAL INDICATORS TOGGLE BAR
+    st.markdown("---")
+    st.markdown("### 🛠️ Index Chart Indicator Controls")
+    c_ind1, c_ind2, c_ind3, c_ind4 = st.columns(4)
+    idx_show_rsi = c_ind1.checkbox("Index RSI (14)", value=True, key="idx_rsi_check")
+    idx_show_macd = c_ind2.checkbox("Index MACD", value=True, key="idx_macd_check")
+    idx_show_bb = c_ind3.checkbox("Index Bollinger Bands", value=True, key="idx_bb_check")
+    idx_show_ema = c_ind4.checkbox("Index EMA 9 / 21", value=True, key="idx_ema_check")
+
     # ---------------------------------------------------------
-    # OPTION CHAIN MATRIX (CALLS | STRIKE | PUTS)
+    # DUAL CHARTS TERMINAL (INDEX CHART | OPTION CONTRACT CHART)
     # ---------------------------------------------------------
+    st.markdown("### 🖥️ Dual Chart Terminal (Index Spot vs. Option Premium)")
+    
+    col_idx_chart, col_opt_chart = st.columns(2)
+
+    # LEFT COLUMN: LIVE INDEX SPOT CHART WITH RSI & MACD
+    with col_idx_chart:
+        df_idx_chart = get_index_intraday_ohlc(idx_symbol, opt_timeframe)
+        if not df_idx_chart.empty:
+            # Indicator Calculations
+            df_idx_chart['EMA_9'] = df_idx_chart['Close'].ewm(span=9, adjust=False).mean()
+            df_idx_chart['EMA_21'] = df_idx_chart['Close'].ewm(span=21, adjust=False).mean()
+            
+            # Bollinger Bands
+            df_idx_chart['SMA_20'] = df_idx_chart['Close'].rolling(window=20).mean()
+            std_20_idx = df_idx_chart['Close'].rolling(window=20).std()
+            df_idx_chart['BB_Upper'] = df_idx_chart['SMA_20'] + (2 * std_20_idx)
+            df_idx_chart['BB_Lower'] = df_idx_chart['SMA_20'] - (2 * std_20_idx)
+
+            # RSI Calculation
+            delta_idx = df_idx_chart['Close'].diff()
+            gain_idx = (delta_idx.where(delta_idx > 0, 0)).rolling(window=14).mean()
+            loss_idx = (-delta_idx.where(delta_idx < 0, 0)).rolling(window=14).mean()
+            df_idx_chart['RSI'] = 100 - (100 / (1 + (gain_idx / loss_idx)))
+
+            # MACD Calculation
+            ema_12_idx = df_idx_chart['Close'].ewm(span=12, adjust=False).mean()
+            ema_26_idx = df_idx_chart['Close'].ewm(span=26, adjust=False).mean()
+            df_idx_chart['MACD'] = ema_12_idx - ema_26_idx
+            df_idx_chart['MACD_Signal'] = df_idx_chart['MACD'].ewm(span=9, adjust=False).mean()
+            df_idx_chart['MACD_Hist'] = df_idx_chart['MACD'] - df_idx_chart['MACD_Signal']
+
+            # Dynamic Subplot Setup based on selected toggles
+            idx_rows = 2  # Main + Volume
+            row_heights = [0.55, 0.15]
+
+            if idx_show_rsi:
+                idx_rows += 1
+                row_heights.append(0.15)
+            if idx_show_macd:
+                idx_rows += 1
+                row_heights.append(0.15)
+
+            fig_idx = make_subplots(rows=idx_rows, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=row_heights)
+            
+            # Row 1: Candlestick & Overlays
+            fig_idx.add_trace(go.Candlestick(
+                x=df_idx_chart.index, open=df_idx_chart['Open'], high=df_idx_chart['High'],
+                low=df_idx_chart['Low'], close=df_idx_chart['Close'], name=f"{chosen_index}"
+            ), row=1, col=1)
+
+            if idx_show_ema:
+                fig_idx.add_trace(go.Scatter(x=df_idx_chart.index, y=df_idx_chart['EMA_9'], mode='lines', name='9 EMA', line=dict(color='yellow', width=1.2)), row=1, col=1)
+                fig_idx.add_trace(go.Scatter(x=df_idx_chart.index, y=df_idx_chart['EMA_21'], mode='lines', name='21 EMA', line=dict(color='cyan', width=1.2)), row=1, col=1)
+
+            if idx_show_bb:
+                fig_idx.add_trace(go.Scatter(x=df_idx_chart.index, y=df_idx_chart['BB_Upper'], mode='lines', name='BB Upper', line=dict(color='gray', dash='dash')), row=1, col=1)
+                fig_idx.add_trace(go.Scatter(x=df_idx_chart.index, y=df_idx_chart['BB_Lower'], mode='lines', name='BB Lower', line=dict(color='gray', dash='dash')), row=1, col=1)
+
+            # Row 2: Volume
+            vol_colors_idx = ['green' if df_idx_chart['Close'].iloc[i] >= df_idx_chart['Open'].iloc[i] else 'red' for i in range(len(df_idx_chart))]
+            fig_idx.add_trace(go.Bar(x=df_idx_chart.index, y=df_idx_chart['Volume'], name='Volume', marker_color=vol_colors_idx), row=2, col=1)
+
+            current_row = 3
+            # RSI Subplot
+            if idx_show_rsi:
+                fig_idx.add_trace(go.Scatter(x=df_idx_chart.index, y=df_idx_chart['RSI'], mode='lines', name='RSI (14)', line=dict(color='purple', width=1.2)), row=current_row, col=1)
+                fig_idx.add_hline(y=70, line_dash="dash", line_color="red", row=current_row, col=1)
+                fig_idx.add_hline(y=30, line_dash="dash", line_color="green", row=current_row, col=1)
+                current_row += 1
+
+            # MACD Subplot
+            if idx_show_macd:
+                fig_idx.add_trace(go.Scatter(x=df_idx_chart.index, y=df_idx_chart['MACD'], mode='lines', name='MACD', line=dict(color='royalblue', width=1.2)), row=current_row, col=1)
+                fig_idx.add_trace(go.Scatter(x=df_idx_chart.index, y=df_idx_chart['MACD_Signal'], mode='lines', name='Signal', line=dict(color='darkorange', width=1.2)), row=current_row, col=1)
+                macd_hist_colors = ['green' if val >= 0 else 'red' for val in df_idx_chart['MACD_Hist']]
+                fig_idx.add_trace(go.Bar(x=df_idx_chart.index, y=df_idx_chart['MACD_Hist'], name='Hist', marker_color=macd_hist_colors), row=current_row, col=1)
+
+            fig_idx.update_layout(
+                title=f"🏛️ {chosen_index} Spot Price ({opt_timeframe}) — Spot: ₹{spot_price:,.2f}",
+                height=520, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=10, r=10, t=40, b=10)
+            )
+            st.plotly_chart(fig_idx, use_container_width=True)
+        else:
+            st.info("Loading Index Chart...")
+
+    # RIGHT COLUMN: LIVE OPTION CONTRACT CHART
+    with col_opt_chart:
+        df_opt_chart = get_option_intraday_ohlc(idx_symbol, idx_code, float(selected_strike), opt_code_chart, opt_timeframe)
+        if not df_opt_chart.empty:
+            df_opt_chart['EMA_9'] = df_opt_chart['Close'].ewm(span=9, adjust=False).mean()
+            df_opt_chart['EMA_21'] = df_opt_chart['Close'].ewm(span=21, adjust=False).mean()
+
+            fig_opt = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=[0.75, 0.25])
+            fig_opt.add_trace(go.Candlestick(
+                x=df_opt_chart.index, open=df_opt_chart['Open'], high=df_opt_chart['High'],
+                low=df_opt_chart['Low'], close=df_opt_chart['Close'], name=f"{opt_chart_ticker}"
+            ), row=1, col=1)
+            fig_opt.add_trace(go.Scatter(x=df_opt_chart.index, y=df_opt_chart['EMA_9'], mode='lines', name='9 EMA', line=dict(color='yellow', width=1.2)), row=1, col=1)
+            fig_opt.add_trace(go.Scatter(x=df_opt_chart.index, y=df_opt_chart['EMA_21'], mode='lines', name='21 EMA', line=dict(color='purple', width=1.2)), row=1, col=1)
+
+            vol_colors_opt = ['green' if df_opt_chart['Close'].iloc[i] >= df_opt_chart['Open'].iloc[i] else 'red' for i in range(len(df_opt_chart))]
+            fig_opt.add_trace(go.Bar(x=df_opt_chart.index, y=df_opt_chart['Volume'], name='Option Volume', marker_color=vol_colors_opt), row=2, col=1)
+
+            fig_opt.update_layout(
+                title=f"📈 {opt_chart_ticker} Premium Chart ({opt_timeframe}) — Premium: ₹{df_opt_chart['Close'].iloc[-1]:.2f}",
+                height=520, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=10, r=10, t=40, b=10)
+            )
+            st.plotly_chart(fig_opt, use_container_width=True)
+        else:
+            st.info("Loading Option Premium Chart...")
+
+    # ---------------------------------------------------------
+    # OPTION CHAIN MATRIX
+    # ---------------------------------------------------------
+    st.markdown("---")
     st.markdown("### 📋 Live Option Chain Matrix")
     
     chain_rows = []
@@ -467,75 +604,15 @@ with main_tab2:
     st.caption(f"📊 **Total Call OI:** {tot_call_oi:,} | **Total Put OI:** {tot_put_oi:,} | **Put-Call Ratio (PCR):** {pcr:.2f} ({pcr_sentiment})")
 
     # ---------------------------------------------------------
-    # INDIVIDUAL OPTION CONTRACT INTRADAY CHARTING ENGINE
+    # CONTRACT ORDER EXECUTION DESK
     # ---------------------------------------------------------
     st.markdown("---")
-    st.markdown("### 📈 Individual Option Contract Intraday Chart")
-    
-    c_chart1, c_chart2, c_chart3 = st.columns([1, 1, 1])
-    with c_chart1:
-        selected_strike = st.selectbox("Select Strike Price for Charting:", strikes, index=5, key="chart_strike")
-    with c_chart2:
-        opt_type_chart = st.radio("Option Type:", ["Call Option (CE)", "Put Option (PE)"], horizontal=True, key="chart_opt_type")
-        opt_code_chart = "CE" if "Call" in opt_type_chart else "PE"
-    with c_chart3:
-        opt_timeframe = st.selectbox("Intraday Timeframe:", ["1m", "3m", "5m", "15m", "30m", "60m"], index=2, key="chart_tf")
-
-    opt_chart_ticker = f"OPT:{idx_code}:{selected_strike}:{opt_code_chart}"
-    df_opt_chart = get_option_intraday_ohlc(idx_symbol, idx_code, float(selected_strike), opt_code_chart, opt_timeframe)
-
-    if not df_opt_chart.empty:
-        df_opt_chart['EMA_9'] = df_opt_chart['Close'].ewm(span=9, adjust=False).mean()
-        df_opt_chart['EMA_21'] = df_opt_chart['Close'].ewm(span=21, adjust=False).mean()
-
-        m_opt1, m_opt2, m_opt3, m_opt4 = st.columns(4)
-        m_opt1.metric("Live Premium", f"₹{df_opt_chart['Close'].iloc[-1]:.2f}")
-        m_opt2.metric("Intraday High", f"₹{df_opt_chart['High'].max():.2f}")
-        m_opt3.metric("Intraday Low", f"₹{df_opt_chart['Low'].min():.2f}")
-        m_opt4.metric("Open Premium", f"₹{df_opt_chart['Open'].iloc[0]:.2f}")
-
-        fig_opt = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=[0.7, 0.3])
-        
-        # Option Premium Candlestick
-        fig_opt.add_trace(
-            go.Candlestick(
-                x=df_opt_chart.index,
-                open=df_opt_chart['Open'],
-                high=df_opt_chart['High'],
-                low=df_opt_chart['Low'],
-                close=df_opt_chart['Close'],
-                name=f"{opt_chart_ticker} Premium"
-            ), row=1, col=1
-        )
-        
-        fig_opt.add_trace(go.Scatter(x=df_opt_chart.index, y=df_opt_chart['EMA_9'], mode='lines', name='9 EMA', line=dict(color='yellow', width=1.5)), row=1, col=1)
-        fig_opt.add_trace(go.Scatter(x=df_opt_chart.index, y=df_opt_chart['EMA_21'], mode='lines', name='21 EMA', line=dict(color='purple', width=1.5)), row=1, col=1)
-
-        # Volume
-        vol_colors = ['green' if df_opt_chart['Close'].iloc[i] >= df_opt_chart['Open'].iloc[i] else 'red' for i in range(len(df_opt_chart))]
-        fig_opt.add_trace(go.Bar(x=df_opt_chart.index, y=df_opt_chart['Volume'], name='Option Volume', marker_color=vol_colors), row=2, col=1)
-
-        fig_opt.update_layout(
-            title=f"Intraday Premium Chart: {opt_chart_ticker} ({opt_timeframe} candles)",
-            height=480,
-            xaxis_rangeslider_visible=False,
-            template="plotly_dark",
-            margin=dict(l=10, r=10, t=40, b=10)
-        )
-        st.plotly_chart(fig_opt, use_container_width=True)
-    else:
-        st.info("⌛ Fetching option intraday ticks... Please wait or refresh.")
-
-    # ---------------------------------------------------------
-    # QUICK ORDER EXECUTION DESK
-    # ---------------------------------------------------------
-    st.markdown("---")
-    st.markdown("### 💳 Contract Order Execution")
+    st.markdown("### 💳 Contract Order Execution Desk")
     col_exec1, col_exec2 = st.columns(2)
 
     with col_exec1:
         premium = calculate_option_premium(spot_price, float(selected_strike), opt_code_chart, idx_code)
-        st.info(f"💡 **Contract:** `{opt_chart_ticker}`\n\n**Live Premium:** ₹{premium:.2f} / share | **1 Lot** = {lot_size} shares")
+        st.info(f"💡 **Active Contract:** `{opt_chart_ticker}`\n\n**Live Premium:** ₹{premium:.2f} / share | **1 Lot** = {lot_size} shares")
 
     with col_exec2:
         opt_trade_action = st.radio("Order Action:", ["BUY", "SELL"], key="opt_action", horizontal=True)
@@ -543,7 +620,7 @@ with main_tab2:
         total_shares = num_lots * lot_size
         total_premium_cost = total_shares * premium
 
-        st.metric("Total Order Cost", f"₹{total_premium_cost:,.2f}")
+        st.metric("Total Order Value", f"₹{total_premium_cost:,.2f}")
         st.caption(f"📍 **Max Allowed per Order ({max_alloc_pct}%):** ₹{max_trade_budget:,.2f}")
 
         existing_opt_pos = supabase.table("portfolio").select("*").eq("student_id", student_id).eq("ticker", opt_chart_ticker).execute().data
