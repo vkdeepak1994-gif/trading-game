@@ -88,16 +88,15 @@ def get_current_price(ticker_symbol: str) -> float:
 
 @st.cache_data(ttl=30)
 def get_index_intraday_ohlc(idx_symbol: str, timeframe: str) -> pd.DataFrame:
-    """Fetches Intraday OHLC Data for Index Spot Price."""
     interval_map = {
-        "1m": ("1d", "1m"),
-        "3m": ("1d", "1m"),
+        "1m": ("5d", "1m"),
+        "3m": ("5d", "1m"),
         "5m": ("5d", "5m"),
         "15m": ("5d", "15m"),
         "30m": ("5d", "30m"),
         "60m": ("7d", "60m")
     }
-    period, yf_interval = interval_map.get(timeframe, ("1d", "1m"))
+    period, yf_interval = interval_map.get(timeframe, ("5d", "1m"))
     try:
         df = yf.Ticker(idx_symbol).history(period=period, interval=yf_interval)
         if df.empty:
@@ -116,7 +115,6 @@ def get_index_intraday_ohlc(idx_symbol: str, timeframe: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=30)
 def get_option_intraday_ohlc(idx_symbol: str, idx_code: str, strike: float, opt_type: str, timeframe: str) -> pd.DataFrame:
-    """Generates dynamic multi-timeframe OHLC candlestick data for Option Premiums."""
     df_idx = get_index_intraday_ohlc(idx_symbol, timeframe)
     if df_idx.empty:
         return pd.DataFrame()
@@ -175,7 +173,7 @@ if not st.session_state.user:
                         "roll_no": roll_no, 
                         "name": name, 
                         "pin": pin, 
-                        "cash": 1000000.0  # CHANGED: Starting capital is now 10 Lakhs
+                        "cash": 1000000.0  # 10 Lakhs Capital
                     }).execute()
                     if res.data:
                         st.sidebar.success("🎉 Registered! Switch to Login to sign in.")
@@ -211,17 +209,16 @@ else:
         st.session_state.user = None
         st.rerun()
 
-# Global Risk Parameter Sidebar
 st.sidebar.markdown("---")
 st.sidebar.subheader("🛡️ Risk Controls")
-max_alloc_pct = st.sidebar.slider("Max Capital per Trade (% of Cash):", min_value=10, max_value=100, value=30, step=5)
+max_alloc_pct = st.sidebar.slider("Max Capital per Trade (%):", min_value=10, max_value=100, value=30, step=5)
 
 # ---------------------------------------------------------
 # 4. APP TABS
 # ---------------------------------------------------------
 main_tab1, main_tab2, main_tab3 = st.tabs([
     "📊 Pro Stock Terminal", 
-    "⚡ Option Chain & Dual Trading Desk", 
+    "⚡ Option Chain & F&O Desk", 
     "🏆 Live Class Leaderboard"
 ])
 
@@ -299,6 +296,8 @@ with main_tab1:
 
     st.subheader("📉 Technical Chart with Custom Indicators & S/R Pivots")
     fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=row_heights)
+    
+    # Main Candlestick Chart
     fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Candlestick"), row=1, col=1)
     
     if show_sma:
@@ -329,7 +328,16 @@ with main_tab1:
         colors = ['green' if val >= 0 else 'red' for val in df['MACD_Hist']]
         fig.add_trace(go.Bar(x=df.index, y=df['MACD_Hist'], name='Histogram', marker_color=colors), row=curr_row, col=1)
 
-    fig.update_layout(height=520, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=10, r=10, t=30, b=10))
+    fig.update_layout(
+        height=520, 
+        xaxis_rangeslider_visible=False, 
+        template="plotly_dark", 
+        margin=dict(l=10, r=10, t=30, b=10)
+    )
+    
+    # Hide weekend gaps for cleaner candlestick render
+    fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
+    
     st.plotly_chart(fig, use_container_width=True)
 
     col_tr, col_po = st.columns([1.2, 1.5])
@@ -444,7 +452,6 @@ with main_tab2:
 
     opt_chart_ticker = f"OPT:{idx_code}:{selected_strike}:{opt_code_chart}"
 
-    # INDEX TECHNICAL INDICATORS TOGGLE BAR
     st.markdown("---")
     st.markdown("### 🛠️ Index Chart Indicator Controls")
     c_ind1, c_ind2, c_ind3, c_ind4 = st.columns(4)
@@ -453,42 +460,33 @@ with main_tab2:
     idx_show_bb = c_ind3.checkbox("Index Bollinger Bands", value=True, key="idx_bb_check")
     idx_show_ema = c_ind4.checkbox("Index EMA 9 / 21", value=True, key="idx_ema_check")
 
-    # ---------------------------------------------------------
-    # DUAL CHARTS TERMINAL (INDEX CHART | OPTION CONTRACT CHART)
-    # ---------------------------------------------------------
     st.markdown("### 🖥️ Dual Chart Terminal (Index Spot vs. Option Premium)")
-    
     col_idx_chart, col_opt_chart = st.columns(2)
 
-    # LEFT COLUMN: LIVE INDEX SPOT CHART WITH RSI & MACD
+    # LEFT COLUMN: LIVE INDEX SPOT CHART
     with col_idx_chart:
         df_idx_chart = get_index_intraday_ohlc(idx_symbol, opt_timeframe)
         if not df_idx_chart.empty:
-            # Indicator Calculations
             df_idx_chart['EMA_9'] = df_idx_chart['Close'].ewm(span=9, adjust=False).mean()
             df_idx_chart['EMA_21'] = df_idx_chart['Close'].ewm(span=21, adjust=False).mean()
             
-            # Bollinger Bands
             df_idx_chart['SMA_20'] = df_idx_chart['Close'].rolling(window=20).mean()
             std_20_idx = df_idx_chart['Close'].rolling(window=20).std()
             df_idx_chart['BB_Upper'] = df_idx_chart['SMA_20'] + (2 * std_20_idx)
             df_idx_chart['BB_Lower'] = df_idx_chart['SMA_20'] - (2 * std_20_idx)
 
-            # RSI Calculation
             delta_idx = df_idx_chart['Close'].diff()
             gain_idx = (delta_idx.where(delta_idx > 0, 0)).rolling(window=14).mean()
             loss_idx = (-delta_idx.where(delta_idx < 0, 0)).rolling(window=14).mean()
             df_idx_chart['RSI'] = 100 - (100 / (1 + (gain_idx / loss_idx)))
 
-            # MACD Calculation
             ema_12_idx = df_idx_chart['Close'].ewm(span=12, adjust=False).mean()
             ema_26_idx = df_idx_chart['Close'].ewm(span=26, adjust=False).mean()
             df_idx_chart['MACD'] = ema_12_idx - ema_26_idx
             df_idx_chart['MACD_Signal'] = df_idx_chart['MACD'].ewm(span=9, adjust=False).mean()
             df_idx_chart['MACD_Hist'] = df_idx_chart['MACD'] - df_idx_chart['MACD_Signal']
 
-            # Dynamic Subplot Setup based on selected toggles
-            idx_rows = 2  # Main + Volume
+            idx_rows = 2
             row_heights = [0.55, 0.15]
 
             if idx_show_rsi:
@@ -500,7 +498,6 @@ with main_tab2:
 
             fig_idx = make_subplots(rows=idx_rows, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=row_heights)
             
-            # Row 1: Candlestick & Overlays
             fig_idx.add_trace(go.Candlestick(
                 x=df_idx_chart.index, open=df_idx_chart['Open'], high=df_idx_chart['High'],
                 low=df_idx_chart['Low'], close=df_idx_chart['Close'], name=f"{chosen_index}"
@@ -514,19 +511,16 @@ with main_tab2:
                 fig_idx.add_trace(go.Scatter(x=df_idx_chart.index, y=df_idx_chart['BB_Upper'], mode='lines', name='BB Upper', line=dict(color='gray', dash='dash')), row=1, col=1)
                 fig_idx.add_trace(go.Scatter(x=df_idx_chart.index, y=df_idx_chart['BB_Lower'], mode='lines', name='BB Lower', line=dict(color='gray', dash='dash')), row=1, col=1)
 
-            # Row 2: Volume
             vol_colors_idx = ['green' if df_idx_chart['Close'].iloc[i] >= df_idx_chart['Open'].iloc[i] else 'red' for i in range(len(df_idx_chart))]
             fig_idx.add_trace(go.Bar(x=df_idx_chart.index, y=df_idx_chart['Volume'], name='Volume', marker_color=vol_colors_idx), row=2, col=1)
 
             current_row = 3
-            # RSI Subplot
             if idx_show_rsi:
                 fig_idx.add_trace(go.Scatter(x=df_idx_chart.index, y=df_idx_chart['RSI'], mode='lines', name='RSI (14)', line=dict(color='purple', width=1.2)), row=current_row, col=1)
                 fig_idx.add_hline(y=70, line_dash="dash", line_color="red", row=current_row, col=1)
                 fig_idx.add_hline(y=30, line_dash="dash", line_color="green", row=current_row, col=1)
                 current_row += 1
 
-            # MACD Subplot
             if idx_show_macd:
                 fig_idx.add_trace(go.Scatter(x=df_idx_chart.index, y=df_idx_chart['MACD'], mode='lines', name='MACD', line=dict(color='royalblue', width=1.2)), row=current_row, col=1)
                 fig_idx.add_trace(go.Scatter(x=df_idx_chart.index, y=df_idx_chart['MACD_Signal'], mode='lines', name='Signal', line=dict(color='darkorange', width=1.2)), row=current_row, col=1)
@@ -537,6 +531,10 @@ with main_tab2:
                 title=f"🏛️ {chosen_index} Spot Price ({opt_timeframe}) — Spot: ₹{spot_price:,.2f}",
                 height=520, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=10, r=10, t=40, b=10)
             )
+            
+            # Hide gaps for clear Candlesticks
+            fig_idx.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"]), dict(bounds=[15.5, 9.25], pattern="hour")])
+            
             st.plotly_chart(fig_idx, use_container_width=True)
         else:
             st.info("Loading Index Chart...")
@@ -563,6 +561,10 @@ with main_tab2:
                 title=f"📈 {opt_chart_ticker} Premium Chart ({opt_timeframe}) — Premium: ₹{df_opt_chart['Close'].iloc[-1]:.2f}",
                 height=520, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=10, r=10, t=40, b=10)
             )
+            
+            # Hide gaps for clear Candlesticks
+            fig_opt.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"]), dict(bounds=[15.5, 9.25], pattern="hour")])
+            
             st.plotly_chart(fig_opt, use_container_width=True)
         else:
             st.info("Loading Option Premium Chart...")
@@ -686,6 +688,7 @@ with main_tab2:
         st.table(pd.DataFrame(opt_display))
     else:
         st.info("No active option contracts.")
+
 # =========================================================
 # TAB 3: LIVE CLASS LEADERBOARD
 # =========================================================
@@ -694,67 +697,52 @@ with main_tab3:
     if st.button("🔄 Refresh Standings"):
         st.rerun()
 
-    # Fetch all students and portfolio holdings
     all_students = supabase.table("students").select("*").execute().data
     all_portfolios = supabase.table("portfolio").select("*").execute().data
 
-    # Map current prices for all unique tickers held by students
     unique_tickers = list(set([p["ticker"] for p in all_portfolios]))
     price_map = {t: get_current_price(t) for t in unique_tickers}
 
     leaderboard = []
     for s in all_students:
         s_cash = float(s["cash"])
-        
-        # Get holdings specifically for this student
         s_holdings = [p for p in all_portfolios if p["student_id"] == s["id"]]
         
         s_asset_val = 0.0
         active_trades_list = []
 
-        # Calculate metrics for each specific trade/holding
         for p in s_holdings:
             ticker = p["ticker"]
             qty = p["qty"]
             avg_price = float(p["avg_price"])
             cur_price = price_map.get(ticker, 0.0)
             
-            # Market value & PnL for this specific trade
             mkt_val = qty * cur_price
             s_asset_val += mkt_val
             
             pnl = mkt_val - (qty * avg_price)
             pnl_str = f"+₹{pnl:,.2f}" if pnl >= 0 else f"-₹{abs(pnl):,.2f}"
             
-            # Format the trade details string
             active_trades_list.append(f"{ticker} [Qty: {qty} | PnL: {pnl_str}]")
 
-        # Compile final net worth
         total_val = s_cash + s_asset_val
-        ret_pct = ((total_val - 1000000.0) / 1000000.0) * 100  # Based on 10 Lakhs
+        ret_pct = ((total_val - 1000000.0) / 1000000.0) * 100  # Return based on 10 Lakhs
 
-        # Join all active trades into a single readable string, or show "No Active Trades"
         trades_summary = "  ||  ".join(active_trades_list) if active_trades_list else "No Active Trades"
 
         leaderboard.append({
             "Student Name": s["name"],
             "Roll Number": s["roll_no"],
-            "Total Net Worth (₹)": total_val, # Kept as float for sorting
+            "Total Net Worth (₹)": total_val, 
             "Return (%)": f"{ret_pct:+.2f}%",
             "Cash Balance (₹)": f"₹{s_cash:,.2f}",
             "Open Trades Details (Ticker | Qty | PnL)": trades_summary
         })
 
-    # Render Leaderboard
     if leaderboard:
-        # Sort by Total Net Worth
         df_lb = pd.DataFrame(leaderboard).sort_values(by="Total Net Worth (₹)", ascending=False).reset_index(drop=True)
-        df_lb.index += 1  # Start rank index at 1
-        
-        # Format the Net Worth column back to string for clean UI display
+        df_lb.index += 1 
         df_lb["Total Net Worth (₹)"] = df_lb["Total Net Worth (₹)"].apply(lambda x: f"₹{x:,.2f}")
-        
-        # Display the dataframe in Streamlit
         st.dataframe(df_lb, use_container_width=True)
     else:
         st.info("No students registered yet.")
