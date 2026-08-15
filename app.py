@@ -9,7 +9,7 @@ import math
 # ---------------------------------------------------------
 # 1. DATABASE & PAGE SETUP
 # ---------------------------------------------------------
-st.set_page_config(page_title="B.Com Investment Terminal & F&O Desk", layout="wide")
+st.set_page_config(page_title="B.Com Advanced Trading Terminal", layout="wide")
 
 @st.cache_resource
 def init_supabase() -> Client:
@@ -27,37 +27,29 @@ if "user" not in st.session_state:
     st.session_state.user = None
 
 # ---------------------------------------------------------
-# 2. BLACK-SCHOLES OPTIONS PRICING ENGINE
+# 2. BLACK-SCHOLES OPTIONS ENGINE & PRICE FETCHING
 # ---------------------------------------------------------
 def norm_cdf(x):
-    """Cumulative distribution function for standard normal distribution."""
     return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
 
 def calculate_option_premium(spot: float, strike: float, opt_type: str, index_name: str) -> float:
-    """Calculates Black-Scholes option premium for Nifty/BankNifty."""
     if spot <= 0 or strike <= 0:
         return 0.0
-
-    T = 7.0 / 365.0  # 7 days to weekly expiry
-    r = 0.07          # 7% risk-free rate
-    sigma = 0.18 if "BANK" in index_name else 0.14  # Implied Volatility
-
+    T = 7.0 / 365.0
+    r = 0.07
+    sigma = 0.18 if "BANK" in index_name else 0.14
     d1 = (math.log(spot / strike) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
     d2 = d1 - sigma * math.sqrt(T)
 
     if opt_type == "CE":
         price = spot * norm_cdf(d1) - strike * math.exp(-r * T) * norm_cdf(d2)
         intrinsic = max(0.0, spot - strike)
-    else:  # PE
+    else:
         price = strike * math.exp(-r * T) * norm_cdf(-d2) - spot * norm_cdf(-d1)
         intrinsic = max(0.0, strike - spot)
 
-    # Floor pricing for time value realism
     return round(max(price, intrinsic, 8.50), 2)
 
-# ---------------------------------------------------------
-# 3. PRICE FETCHING ENGINE
-# ---------------------------------------------------------
 @st.cache_data(ttl=15)
 def get_spot_price(symbol: str) -> float:
     try:
@@ -69,9 +61,7 @@ def get_spot_price(symbol: str) -> float:
     return 0.0
 
 def get_current_price(ticker_symbol: str) -> float:
-    """Unified price lookup for both Equities and Options tickers."""
     if ticker_symbol.startswith("OPT:"):
-        # Format: OPT:NIFTY:24500:CE
         _, idx_code, strike_str, opt_type = ticker_symbol.split(":")
         spot_ticker = "^NSEI" if idx_code == "NIFTY" else "^NSEBANK"
         spot = get_spot_price(spot_ticker)
@@ -86,7 +76,7 @@ def get_current_price(ticker_symbol: str) -> float:
         return 0.0
 
 # ---------------------------------------------------------
-# 4. AUTHENTICATION (LOGIN / REGISTER)
+# 3. AUTHENTICATION (LOGIN / REGISTER)
 # ---------------------------------------------------------
 st.sidebar.title("👤 Student Portal")
 
@@ -140,24 +130,38 @@ else:
         st.session_state.user = None
         st.rerun()
 
+# Global Risk Parameter Sidebar
+st.sidebar.markdown("---")
+st.sidebar.subheader("🛡️ Risk Controls")
+max_alloc_pct = st.sidebar.slider("Max Capital per Trade (% of Cash):", min_value=10, max_value=100, value=30, step=5)
+
 # ---------------------------------------------------------
-# 5. APP TABS
+# 4. APP TABS
 # ---------------------------------------------------------
 main_tab1, main_tab2, main_tab3 = st.tabs([
-    "📊 Stock Terminal", 
+    "📊 Pro Stock Terminal", 
     "⚡ Options Desk (F&O)", 
     "🏆 Live Class Leaderboard"
 ])
 
 student_id = st.session_state.user["id"]
 current_cash = float(st.session_state.user["cash"])
+max_trade_budget = current_cash * (max_alloc_pct / 100.0)
 
 # =========================================================
-# TAB 1: STOCK TERMINAL
+# TAB 1: PRO STOCK TERMINAL
 # =========================================================
 with main_tab1:
     ticker_input = st.sidebar.text_input("Stock Ticker (e.g. RELIANCE.NS, TCS.NS, AAPL):", value="RELIANCE.NS").upper()
-    time_frame = st.sidebar.selectbox("Select Timeframe:", ["1mo", "3mo", "6mo", "1y"], index=2)
+    time_frame = st.sidebar.selectbox("Timeframe:", ["1mo", "3mo", "6mo", "1y"], index=2)
+
+    # Indicator Toggles
+    st.sidebar.markdown("**Technical Indicators:**")
+    show_sma = st.sidebar.checkbox("20 SMA", value=True)
+    show_ema = st.sidebar.checkbox("50 EMA", value=True)
+    show_bb = st.sidebar.checkbox("Bollinger Bands", value=True)
+    show_rsi = st.sidebar.checkbox("RSI (14)", value=True)
+    show_macd = st.sidebar.checkbox("MACD", value=True)
 
     try:
         stock = yf.Ticker(ticker_input)
@@ -168,11 +172,27 @@ with main_tab1:
         st.error(f"Failed to fetch stock data for: {ticker_input}")
         st.stop()
 
+    # Calculate Indicators
     df['SMA_20'] = df['Close'].rolling(window=20).mean()
+    df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
+    
+    # Bollinger Bands
+    std_20 = df['Close'].rolling(window=20).std()
+    df['BB_Upper'] = df['SMA_20'] + (2 * std_20)
+    df['BB_Lower'] = df['SMA_20'] - (2 * std_20)
+
+    # RSI
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     df['RSI'] = 100 - (100 / (1 + (gain / loss)))
+
+    # MACD
+    ema_12 = df['Close'].ewm(span=12, adjust=False).mean()
+    ema_26 = df['Close'].ewm(span=26, adjust=False).mean()
+    df['MACD'] = ema_12 - ema_26
+    df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
 
     st.subheader(f"📊 Fundamental Analysis: {info.get('longName', ticker_input)}")
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -182,29 +202,78 @@ with main_tab1:
     c4.metric("Debt-to-Equity", f"{info.get('debtToEquity', 'N/A')}")
     c5.metric("52W High", f"₹{info.get('fiftyTwoWeekHigh', 'N/A')}")
 
-    st.subheader("📉 Technical Chart (Candlesticks + RSI)")
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
+    # Chart Subplots Setup
+    rows = 1
+    row_heights = [0.6]
+    if show_rsi:
+        rows += 1
+        row_heights.append(0.2)
+    if show_macd:
+        rows += 1
+        row_heights.append(0.2)
+
+    st.subheader("📉 Technical Chart with Custom Indicators")
+    fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=row_heights)
+
+    # Main Price Chart
     fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Candlestick"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], mode='lines', name='20 SMA', line=dict(color='orange')), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], mode='lines', name='RSI', line=dict(color='purple')), row=2, col=1)
-    fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
-    fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
-    fig.update_layout(height=420, xaxis_rangeslider_visible=False, template="plotly_dark")
+    
+    if show_sma:
+        fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], mode='lines', name='20 SMA', line=dict(color='orange', width=1.5)), row=1, col=1)
+    if show_ema:
+        fig.add_trace(go.Scatter(x=df.index, y=df['EMA_50'], mode='lines', name='50 EMA', line=dict(color='cyan', width=1.5)), row=1, col=1)
+    if show_bb:
+        fig.add_trace(go.Scatter(x=df.index, y=df['BB_Upper'], mode='lines', name='BB Upper', line=dict(color='gray', dash='dash')), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['BB_Lower'], mode='lines', name='BB Lower', line=dict(color='gray', dash='dash')), row=1, col=1)
+
+    curr_row = 2
+    if show_rsi:
+        fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], mode='lines', name='RSI (14)', line=dict(color='purple')), row=curr_row, col=1)
+        fig.add_hline(y=70, line_dash="dash", line_color="red", row=curr_row, col=1)
+        fig.add_hline(y=30, line_dash="dash", line_color="green", row=curr_row, col=1)
+        curr_row += 1
+
+    if show_macd:
+        fig.add_trace(go.Scatter(x=df.index, y=df['MACD'], mode='lines', name='MACD', line=dict(color='blue')), row=curr_row, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['MACD_Signal'], mode='lines', name='Signal', line=dict(color='orange')), row=curr_row, col=1)
+        colors = ['green' if val >= 0 else 'red' for val in df['MACD_Hist']]
+        fig.add_trace(go.Bar(x=df.index, y=df['MACD_Hist'], name='Histogram', marker_color=colors), row=curr_row, col=1)
+
+    fig.update_layout(height=550, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=10, r=10, t=30, b=10))
     st.plotly_chart(fig, use_container_width=True)
 
-    col_tr, col_po = st.columns([1, 1.5])
+    # Trading & Risk Management Panel
+    col_tr, col_po = st.columns([1.2, 1.5])
     with col_tr:
-        st.subheader("💳 Execute Stock Order")
+        st.subheader("💳 Order & Risk Management")
         trade_type = st.radio("Order Type:", ["BUY", "SELL"], key="stock_order_type", horizontal=True)
         qty = st.number_input("Shares Quantity:", min_value=1, value=5, step=1, key="stock_qty")
         total_cost = qty * current_price
-        st.write(f"**Total Order Cost:** ₹{total_cost:,.2f}")
+        
+        st.caption(f"📍 **Order Value:** ₹{total_cost:,.2f} | **Max Allowed per Order ({max_alloc_pct}%):** ₹{max_trade_budget:,.2f}")
+
+        # Target & Stop-Loss Calculator
+        st.markdown("---")
+        st.markdown("🎯 **Target & Stop-Loss Risk Calculator**")
+        c_tp, c_sl = st.columns(2)
+        target_price = c_tp.number_input("Target Price (₹):", min_value=0.0, value=round(current_price * 1.05, 2))
+        stop_loss_price = c_sl.number_input("Stop Loss Price (₹):", min_value=0.0, value=round(current_price * 0.97, 2))
+
+        potential_profit = (target_price - current_price) * qty
+        potential_loss = (current_price - stop_loss_price) * qty
+        rr_ratio = (target_price - current_price) / max(0.01, (current_price - stop_loss_price)) if trade_type == "BUY" else 0.0
+
+        st.write(f"🟢 **Potential Profit:** ₹{potential_profit:,.2f}")
+        st.write(f"🔴 **Potential Loss:** ₹{potential_loss:,.2f}")
+        st.write(f"⚖️ **Risk-to-Reward Ratio:** 1 : {rr_ratio:.2f}")
 
         existing_pos = supabase.table("portfolio").select("*").eq("student_id", student_id).eq("ticker", ticker_input).execute().data
 
         if st.button("Submit Stock Order"):
             if trade_type == "BUY":
-                if current_cash >= total_cost:
+                if total_cost > max_trade_budget:
+                    st.error(f"⚠️ Order Rejected! ₹{total_cost:,.2f} exceeds your Max Allowed Trade Limit of ₹{max_trade_budget:,.2f} ({max_alloc_pct}% of cash).")
+                elif current_cash >= total_cost:
                     new_cash = current_cash - total_cost
                     supabase.table("students").update({"cash": new_cash}).eq("id", student_id).execute()
                     if existing_pos:
@@ -215,10 +284,10 @@ with main_tab1:
                         supabase.table("portfolio").update({"qty": new_qty, "avg_price": new_avg}).eq("id", existing_pos[0]["id"]).execute()
                     else:
                         supabase.table("portfolio").insert({"student_id": student_id, "ticker": ticker_input, "qty": qty, "avg_price": current_price}).execute()
-                    st.success("Buy order executed!")
+                    st.success("Buy order executed successfully!")
                     st.rerun()
                 else:
-                    st.error("Insufficient Cash!")
+                    st.error("Insufficient Cash Balance!")
             elif trade_type == "SELL":
                 if existing_pos and existing_pos[0]["qty"] >= qty:
                     new_cash = current_cash + total_cost
@@ -228,10 +297,10 @@ with main_tab1:
                     else:
                         new_qty = existing_pos[0]["qty"] - qty
                         supabase.table("portfolio").update({"qty": new_qty}).eq("id", existing_pos[0]["id"]).execute()
-                    st.success("Sell order executed!")
+                    st.success("Sell order executed successfully!")
                     st.rerun()
                 else:
-                    st.error("Insufficient quantity!")
+                    st.error("Insufficient quantity in portfolio!")
 
     with col_po:
         st.subheader("💼 Equity Holdings")
@@ -274,7 +343,6 @@ with main_tab2:
         spot_price = get_spot_price(idx_symbol)
         st.metric(f"Live {chosen_index} Spot Price", f"₹{spot_price:,.2f}")
 
-        # Generate realistic strike prices around spot
         step = 100
         base_strike = round(spot_price / step) * step
         strikes = [base_strike + (i * step) for i in range(-5, 6)]
@@ -289,19 +357,22 @@ with main_tab2:
         st.info(f"💡 **Estimated Premium:** ₹{premium:.2f} per share | **1 Lot** = {lot_size} shares")
 
     with col_opt2:
-        st.markdown("### 💳 Order Execution")
+        st.markdown("### 💳 Order Execution & Allocation Check")
         opt_trade_action = st.radio("Action:", ["BUY", "SELL"], key="opt_action", horizontal=True)
         num_lots = st.number_input("Number of Lots:", min_value=1, value=1, step=1)
         total_shares = num_lots * lot_size
         total_premium_cost = total_shares * premium
 
-        st.metric("Total Investment Required", f"₹{total_premium_cost:,.2f}")
+        st.metric("Total Premium Required", f"₹{total_premium_cost:,.2f}")
+        st.caption(f"📍 **Max Allowed per Order ({max_alloc_pct}%):** ₹{max_trade_budget:,.2f}")
 
         existing_opt_pos = supabase.table("portfolio").select("*").eq("student_id", student_id).eq("ticker", opt_ticker).execute().data
 
         if st.button("Submit Options Order"):
             if opt_trade_action == "BUY":
-                if current_cash >= total_premium_cost:
+                if total_premium_cost > max_trade_budget:
+                    st.error(f"⚠️ Order Rejected! ₹{total_premium_cost:,.2f} exceeds your Max Allowed Allocation Limit of ₹{max_trade_budget:,.2f}.")
+                elif current_cash >= total_premium_cost:
                     new_cash = current_cash - total_premium_cost
                     supabase.table("students").update({"cash": new_cash}).eq("id", student_id).execute()
 
@@ -317,7 +388,7 @@ with main_tab2:
                     st.success(f"Bought {num_lots} Lot(s) of {opt_ticker}!")
                     st.rerun()
                 else:
-                    st.error("Insufficient Cash for Option Premium!")
+                    st.error("Insufficient Cash Balance!")
 
             elif opt_trade_action == "SELL":
                 if existing_opt_pos and existing_opt_pos[0]["qty"] >= total_shares:
@@ -333,7 +404,7 @@ with main_tab2:
                     st.success(f"Sold {num_lots} Lot(s) of {opt_ticker}!")
                     st.rerun()
                 else:
-                    st.error("Insufficient option contracts in portfolio to sell!")
+                    st.error("Insufficient option contracts in portfolio!")
 
     st.markdown("---")
     st.subheader("📜 Open Options Positions")
